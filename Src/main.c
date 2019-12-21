@@ -50,6 +50,12 @@ enum Led
   GREEN_LED = LED_GREEN_Pin
 };
 
+enum DisplayLine
+{
+  UP,
+  DOWN
+};
+
 /* Private define ------------------------------------------------------------*/
 #define CMD_ARG_DELIM ' '
 #define NEW_LINE "\r"
@@ -64,8 +70,6 @@ enum Led
 
 #define ERROR_MSG "Error"
 #define SUCCESS_MSG "OK"
-
-/* Private macro -------------------------------------------------------------*/
 
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart1;
@@ -91,6 +95,14 @@ void PrintToUart(uint8_t* data, const uint16_t length);
 void PrintLineToUart(uint8_t* data, const uint16_t length);
 void ResetUart(void);
 
+void InitDisplay(void);
+void ResetDisplay(void);
+void PrintNextSymbolToDisplay(const char symbol);
+void PrintNextStringToDisplay(const char* str);
+void SendToDisplay(const bool isSymbol, const uint8_t data, const uint32_t cmdDelay);
+void SetDisplayAddress(const uint8_t address);
+void SetDisplayLine(const enum DisplayLine line);
+
 /* Private user code ---------------------------------------------------------*/
 
 /**
@@ -112,6 +124,7 @@ int main(void)
   MX_USART1_UART_Init();
   
   ResetUart();
+  InitDisplay();
   UartRunReceiveInterrupt();
 }
 
@@ -216,21 +229,30 @@ bool ProcessCommand(void)
 
 void OutputCmdResult(const bool cmdResult)
 {
-  char* uartMessage;
+  char* resultMessage;
   if (cmdResult)
   {
     const size_t strByteLength = 3;
-    uartMessage = (char*)malloc((strlen(SUCCESS_MSG) + 1 + strByteLength + 1) * sizeof(char));
-    sprintf(uartMessage, "%s %u", SUCCESS_MSG, GetCommandChecksum());
+    resultMessage = (char*)malloc((strlen(SUCCESS_MSG) + 1 + strByteLength + 1) * sizeof(char));
+    sprintf(resultMessage, "%s %u", SUCCESS_MSG, GetCommandChecksum());
   }
   else
   {
-    uartMessage = (char*)malloc((strlen(ERROR_MSG) + 1) * sizeof(char));
-    strcpy(uartMessage, ERROR_MSG);
+    resultMessage = (char*)malloc((strlen(ERROR_MSG) + 1) * sizeof(char));
+    strcpy(resultMessage, ERROR_MSG);
   }
 
-  PrintLineToUart((uint8_t*)uartMessage, strlen(uartMessage) * sizeof(char));
-  free(uartMessage);
+  PrintLineToUart((uint8_t*)resultMessage, strlen(resultMessage) * sizeof(char));
+
+  ResetDisplay();
+  SetDisplayLine(UP);
+  PrintNextStringToDisplay(command);
+  PrintNextSymbolToDisplay(' ');
+  PrintNextStringToDisplay(argument);
+  SetDisplayLine(DOWN);
+  PrintNextStringToDisplay(resultMessage);
+
+  free(resultMessage);
 }
 
 uint8_t GetCommandChecksum(void)
@@ -319,6 +341,66 @@ bool ProcessSayCmd(void)
 {
   PrintLineToUart((uint8_t*)argument, strlen(argument) * sizeof(char));
   return true;
+}
+
+void InitDisplay(void)
+{
+  HAL_Delay(16);
+  const uint8_t setBusTo8BitAndDoubleLine = 0x3C,
+    shiftOnWrite = 0x6,
+    enableDisplay = 0xC;
+  const uint8_t busCmdDelay = 1,
+    shiftCmdDelay = 1,
+    enableCmdDelay = 1;
+  SendToDisplay(false, setBusTo8BitAndDoubleLine, busCmdDelay);
+  SendToDisplay(false, shiftOnWrite, shiftCmdDelay);
+  SendToDisplay(false, enableDisplay, enableCmdDelay);
+  ResetDisplay();
+}
+
+void ResetDisplay(void)
+{
+  const uint8_t resetDataCmd = 0x1,
+    resetDataDelay = 2;
+  SendToDisplay(false, resetDataCmd, resetDataDelay);
+}
+
+void SendToDisplay(const bool isSymbol, const uint8_t data, const uint32_t cmdDelay)
+{
+  HAL_GPIO_WritePin(DISPLAY_CMD_GPIO_Port, DISPLAY_CMD_Pin, isSymbol ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+  HAL_GPIO_WritePin(GPIOB, data, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOB, ~data, GPIO_PIN_RESET);
+
+  HAL_GPIO_WritePin(DISPLAY_CLK_GPIO_Port, DISPLAY_CLK_Pin, GPIO_PIN_SET);
+  HAL_Delay(1);
+  HAL_GPIO_WritePin(DISPLAY_CLK_GPIO_Port, DISPLAY_CLK_Pin, GPIO_PIN_RESET);
+  HAL_Delay(cmdDelay);
+  HAL_GPIO_WritePin(GPIOB, data, GPIO_PIN_RESET);
+}
+
+void PrintNextSymbolToDisplay(const char symbol)
+{
+  SendToDisplay(true, symbol, 1);
+}
+
+void PrintNextStringToDisplay(const char* str)
+{
+  const size_t printLength = strlen(str);
+  for (size_t i = 0; i < printLength; ++i)
+  {
+    PrintNextSymbolToDisplay(str[i]);
+  }
+}
+
+void SetDisplayAddress(const uint8_t address)
+{
+  SendToDisplay(false, 0x80 | (address & (~0x80)), 1);
+}
+
+void SetDisplayLine(const enum DisplayLine line)
+{
+  SetDisplayAddress(line == DOWN ? 0x40 : 0x0);
 }
 
 /**
