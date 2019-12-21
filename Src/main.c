@@ -1,4 +1,3 @@
-/* USER CODE BEGIN Header */
 /**
   ******************************************************************************
   * @file           : main.c
@@ -16,50 +15,83 @@
   *
   ******************************************************************************
   */
-/* USER CODE END Header */
 
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 
 /* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
-
-/* USER CODE END Includes */
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
 
 /* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN PTD */
+enum UartState
+{
+  CMD_INPUT,
+  DELIM_INPUT,
+  ARG_INPUT
+};
 
-/* USER CODE END PTD */
+enum Command
+{
+  LIGHT_CMD,
+  BLOW_CMD,
+  SAY_CMD,
+  UNKNOWN_CMD
+};
+
+enum Led
+{
+  UNKNOWN_LED,
+  RED_LED = LED_RED_Pin,
+  YELLOW_LED = LED_YELLOW_Pin,
+  GREEN_LED = LED_GREEN_Pin
+};
 
 /* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
+#define CMD_ARG_DELIM ' '
+#define NEW_LINE "\r"
 
-/* USER CODE END PD */
+#define LIGHT_CMD_STR "LIGHT"
+#define BLOW_CMD_STR "BLOW"
+#define RED_LED_ARG_STR "RED"
+#define YELLOW_LED_ARG_STR "YELLOW"
+#define GREEN_LED_ARG_STR "GREEN"
+
+#define SAY_CMD_STR "SAY"
+
+#define ERROR_MSG "Error"
+#define SUCCESS_MSG "OK"
 
 /* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
-
-/* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart1;
-
-/* USER CODE BEGIN PV */
-
-/* USER CODE END PV */
+char* command = NULL, * argument = NULL;
+uint8_t uartInputBuf;
+enum UartState state = CMD_INPUT;
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
-/* USER CODE BEGIN PFP */
 
-/* USER CODE END PFP */
+bool ProcessCommand(void);
+bool ProcessLedCmd(const bool light);
+bool ProcessSayCmd(void);
+void OutputCmdResult(const bool cmdResult);
+uint8_t GetCommandChecksum(void);
+enum Command ParseCmd(void);
+enum Led ParseLedArg(void);
+
+void UartRunReceiveInterrupt(void);
+void PrintToUart(uint8_t* data, const uint16_t length);
+void PrintLineToUart(uint8_t* data, const uint16_t length);
+void ResetUart(void);
 
 /* Private user code ---------------------------------------------------------*/
-/* USER CODE BEGIN 0 */
-
-/* USER CODE END 0 */
 
 /**
   * @brief  The application entry point.
@@ -67,43 +99,226 @@ static void MX_USART1_UART_Init(void);
   */
 int main(void)
 {
-  /* USER CODE BEGIN 1 */
-
-  /* USER CODE END 1 */
-  
-
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
-  /* USER CODE BEGIN Init */
-
-  /* USER CODE END Init */
-
   /* Configure the system clock */
   SystemClock_Config();
-
-  /* USER CODE BEGIN SysInit */
-
-  /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART1_UART_Init();
-  /* USER CODE BEGIN 2 */
+  
+  ResetUart();
+  UartRunReceiveInterrupt();
+}
 
-  /* USER CODE END 2 */
-
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
-  while (1)
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart == &huart1)
   {
-    /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
+    switch (state)
+    {
+      case CMD_INPUT:
+        {
+          if (uartInputBuf == CMD_ARG_DELIM)
+          {
+            state = DELIM_INPUT;
+          }
+          else
+          {
+            const size_t newCommandLength = strlen(command) + 1;
+            command = (char*)realloc(command, (newCommandLength + 1) * sizeof(char));
+            command[newCommandLength - 1] = uartInputBuf;
+            command[newCommandLength] = '\0';
+            char* newLinePtr = strstr(command, NEW_LINE);
+            if (newLinePtr == command)
+            {
+              ResetUart();
+            }
+            else if (newLinePtr != NULL)
+            {
+              *newLinePtr = '\0';
+              OutputCmdResult(ProcessCommand());
+              ResetUart();
+            }
+          }
+        }
+        break;
+      case DELIM_INPUT:
+        {
+          if (uartInputBuf != CMD_ARG_DELIM)
+          {
+            argument = (char*)realloc(argument, 2 * sizeof(char));
+            argument[0] = uartInputBuf;
+            argument[1] = '\0';
+            if (strcmp(argument, NEW_LINE) == 0)
+            {
+              argument[0] = '\0';
+              OutputCmdResult(ProcessCommand());
+              ResetUart();
+            }
+            else
+            {
+              state = ARG_INPUT;
+            }
+          }
+        }
+        break;
+      case ARG_INPUT:
+        {
+          const size_t newArgumentLength = strlen(argument) + 1;
+          argument = (char*)realloc(argument, (newArgumentLength + 1) * sizeof(char));
+          argument[newArgumentLength - 1] = uartInputBuf;
+          argument[newArgumentLength] = '\0';
+          char* newLinePtr = strstr((char*)argument, NEW_LINE);
+          if (newLinePtr != NULL)
+          {
+            *newLinePtr = '\0';
+            OutputCmdResult(ProcessCommand());
+            ResetUart();
+          }
+        }
+        break;
+    }
+    UartRunReceiveInterrupt();
   }
-  /* USER CODE END 3 */
+}
+
+void UartRunReceiveInterrupt(void)
+{
+  HAL_UART_Receive_IT(&huart1, &uartInputBuf, 1);
+}
+
+bool ProcessCommand(void)
+{
+  const enum Command cmd = ParseCmd();
+  bool result;
+  switch (cmd)
+  {
+    case SAY_CMD:
+      result = ProcessSayCmd();
+      break;
+    case LIGHT_CMD:
+      result = ProcessLedCmd(true);
+      break;
+    case BLOW_CMD:
+      result = ProcessLedCmd(false);
+      break;
+    default:
+      result = false;
+      break;
+  }
+  return result;
+}
+
+void OutputCmdResult(const bool cmdResult)
+{
+  char* uartMessage;
+  if (cmdResult)
+  {
+    const size_t strByteLength = 3;
+    uartMessage = (char*)malloc((strlen(SUCCESS_MSG) + 1 + strByteLength + 1) * sizeof(char));
+    sprintf(uartMessage, "%s %u", SUCCESS_MSG, GetCommandChecksum());
+  }
+  else
+  {
+    uartMessage = (char*)malloc((strlen(ERROR_MSG) + 1) * sizeof(char));
+    strcpy(uartMessage, ERROR_MSG);
+  }
+
+  PrintLineToUart((uint8_t*)uartMessage, strlen(uartMessage) * sizeof(char));
+  free(uartMessage);
+}
+
+uint8_t GetCommandChecksum(void)
+{
+  const size_t commandLength = strlen(command), argumentLength = strlen(argument);
+  uint8_t result = 0;
+  for (size_t i = 0; i < commandLength; ++i)
+  {
+    result ^= command[i];
+  }
+  for (size_t i = 0; i < argumentLength; ++i)
+  {
+    result ^= argument[i];
+  }
+  return result;
+}
+
+void PrintToUart(uint8_t* data, const uint16_t length)
+{
+  HAL_UART_Transmit(&huart1, data, length, INT32_MAX);
+}
+
+void PrintLineToUart(uint8_t* data, const uint16_t length)
+{
+  PrintToUart(data, length);
+  PrintToUart((uint8_t*)NEW_LINE, strlen(NEW_LINE));
+}
+
+void ResetUart(void)
+{
+  command = (char*)realloc(command, 1 * sizeof(char));
+  command[0] = '\0';
+  argument = (char*)realloc(argument, 1 * sizeof(char));
+  argument[0] = '\0';
+  state = CMD_INPUT;
+}
+
+enum Command ParseCmd(void)
+{
+  enum Command result = UNKNOWN_CMD;
+  if (strcmp(command, LIGHT_CMD_STR) == 0)
+  {
+    result = LIGHT_CMD;
+  }
+  else if (strcmp(command, BLOW_CMD_STR) == 0)
+  {
+    result = BLOW_CMD;
+  }
+  else if (strcmp(command, SAY_CMD_STR) == 0)
+  {
+    result = SAY_CMD;
+  }
+  return result;
+}
+
+enum Led ParseLedArg(void)
+{
+  enum Led result = UNKNOWN_LED;
+  if (strcmp(argument, RED_LED_ARG_STR) == 0)
+  {
+    result = RED_LED;
+  }
+  else if (strcmp(argument, YELLOW_LED_ARG_STR) == 0)
+  {
+    result = YELLOW_LED;
+  }
+  else if (strcmp(argument, GREEN_LED_ARG_STR) == 0)
+  {
+    result = GREEN_LED;
+  }
+  return result;
+}
+
+bool ProcessLedCmd(const bool light)
+{
+  const enum Led led = ParseLedArg();
+  const bool result = led != UNKNOWN_LED;
+  if (led != UNKNOWN_LED)
+  {
+    HAL_GPIO_WritePin(GPIOA, (uint16_t)led, light ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  }
+  return result;
+}
+
+bool ProcessSayCmd(void)
+{
+  PrintLineToUart((uint8_t*)argument, strlen(argument) * sizeof(char));
+  return true;
 }
 
 /**
@@ -147,14 +362,6 @@ void SystemClock_Config(void)
   */
 static void MX_USART1_UART_Init(void)
 {
-
-  /* USER CODE BEGIN USART1_Init 0 */
-
-  /* USER CODE END USART1_Init 0 */
-
-  /* USER CODE BEGIN USART1_Init 1 */
-
-  /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
   huart1.Init.BaudRate = 115200;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
@@ -167,10 +374,6 @@ static void MX_USART1_UART_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN USART1_Init 2 */
-
-  /* USER CODE END USART1_Init 2 */
-
 }
 
 /**
@@ -214,20 +417,13 @@ static void MX_GPIO_Init(void)
 
 }
 
-/* USER CODE BEGIN 4 */
-
-/* USER CODE END 4 */
-
 /**
   * @brief  This function is executed in case of error occurrence.
   * @retval None
   */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
-
-  /* USER CODE END Error_Handler_Debug */
 }
 
 #ifdef  USE_FULL_ASSERT
@@ -240,10 +436,8 @@ void Error_Handler(void)
   */
 void assert_failed(uint8_t *file, uint32_t line)
 { 
-  /* USER CODE BEGIN 6 */
   /* User can add his own implementation to report the file name and line number,
      tex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
 
