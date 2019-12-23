@@ -395,7 +395,7 @@ void PrintNextStringToDisplay(const char* str)
 
 void SetDisplayAddress(const uint8_t address)
 {
-  SendToDisplay(false, 0x80 | (address & (~0x80)), 1);
+  SendToDisplay(false, 0x80 | address, 1);
 }
 
 void SetDisplayLine(const enum DisplayLine line)
